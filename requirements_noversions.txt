@@ -1,0 +1,13 @@
+tqdm
+numpy
+scipy
+pandas
+matplotlib
+seaborn
+plotly
+scikit-learn
+statsmodels
+openpyxl
+pyarrow
+ipywidgets
+tabulate
