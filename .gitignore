@@ -21,3 +21,5 @@ renv/.gitignore
 .Rproj.user/
 
 renv.zip
+
+model_fits/empirical/fit_*
