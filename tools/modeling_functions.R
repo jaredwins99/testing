@@ -87,7 +87,7 @@ rolling_forecast_nbar <- function(test_df, model, outcome, predictors) {
   forecasts
 }
 
-# 3. Performs walk-forward (expanding) K-fold cross-validation with early stopping
+# 3. Performs walk-forward (expanding) K-fold cross-validation using rolling forecasts in each fold
 walk_forward_cv_nbar <- function(df,
                                  loc,
                                  outcome,
@@ -96,143 +96,84 @@ walk_forward_cv_nbar <- function(df,
                                  test_days = 30,
                                  ar_lags=c(),
                                  mean_lags=c(),
-                                 sample=FALSE,
-                                 bad_fold_threshold = Inf) { # <-- Added threshold parameter
+                                 sample=FALSE) {
 
-  # message("Starting walk_forward_cv_nbar with threshold: ", bad_fold_threshold)
+  # message("Starting walk_forward_cv_nbar with ", paste(predictors, collapse = ", "))
 
   fold_counter <- 1
 
-  # Filter to restaurant (do this once at the start)
-  df_loc <- df %>% dplyr::filter(location_id == loc)
-  if(nrow(df_loc) == 0) {
-      message("walk_forward_cv_nbar: No data found for location_id: ", loc)
-      return(NULL)
-  }
-
+  # Filter to restaurant
+  df <- df %>% dplyr::filter(location_id == loc)
 
   # Set default sample size to the entire dataset
-  if (sample) {df_loc <- df_loc %>% slice(1:sample)}
+  if (sample) {df <- df %>% slice(1:sample)}
 
   # Define training fold end dates:
-  all_dates <- df_loc$date
+  # The first training fold ends after 'initial_train_days' have passed
+  all_dates <- df$date
   first_train_end <- min(all_dates) + days(initial_train_days - 1)
   last_possible_train_end <- max(all_dates) - days(test_days)
+  fold_end_dates <- all_dates[all_dates >= first_train_end & all_dates <= last_possible_train_end]
 
-  # Check if any valid folds are possible
-  if (first_train_end > last_possible_train_end) {
-      message("walk_forward_cv_nbar: Initial train days + test days exceeds data range. No folds possible.")
-      return(NULL)
-  }
-
-  # print(first_train_end) # Keep if useful
-  # print(last_possible_train_end)
+  print(first_train_end)
+  print(last_possible_train_end)
 
   # Move forward by test_days number each time, i.e., move forward one fold
   current_train_end <- first_train_end
 
+
   cv_results <- list()
   while (current_train_end <= last_possible_train_end) {
+    fold_result <- tryCatch({
 
-    fold_data <- NULL # To store the results of the current fold if successful
-
-    fold_status <- tryCatch({
-      # Define the training and testing sets for the current fold
-      train_fold <- df_loc %>%
+      # Define the training set as all data up to and including current_train_end
+      train_fold <- df %>%
         dplyr::filter(date <= current_train_end)
-      test_fold <- df_loc %>%
+      test_fold <- df %>%
         dplyr::filter(date > current_train_end & date <= current_train_end + days(test_days))
 
-      # Ensure the test fold has the expected number of days
-      if (nrow(test_fold) < test_days) {
-          # This might happen near the end if dates are missing
-          message("walk_forward_cv_nbar: Fold ", fold_counter, " skipped. Not enough test days (found ", nrow(test_fold), ", need ", test_days, "). Train end: ", current_train_end)
-          return("skip_fold") # Signal to skip this iteration
-      }
+      # Only include folds where there are at least test_days available after
+      if (nrow(test_fold) < test_days) stop("Not enough test days in the fold")
 
-      # --- Fit and Predict ---
+      # Fit and predict
       model <- fit_nbar_model(train_fold, outcome, predictors, ar_lags, mean_lags)
       if (is.null(model)) {
-        message("walk_forward_cv_nbar: Model fitting failed for fold ", fold_counter, ". Skipping fold.")
-        return("skip_fold") # Signal to skip
-      }
+        message("Model fitting failed for fold ", fold_counter, "; skipping fold.")
+        return(NULL)}
       pred <- rolling_forecast_nbar(test_fold, model, outcome, predictors)
-      # Basic check on prediction output
-      if (is.null(pred) || length(pred) != nrow(test_fold)) {
-           message("walk_forward_cv_nbar: Prediction failed or returned incorrect length for fold ", fold_counter, ". Skipping fold.")
-           return("skip_fold")
-      }
-      if (anyNA(pred)) {
-           message("walk_forward_cv_nbar: Predictions contain NA for fold ", fold_counter, ". Skipping fold.")
-           return("skip_fold")
-      }
 
-
-      # --- Calculate Fold MSE and Check Threshold ---
-      actual_values <- test_fold[[outcome]]
-      fold_mse <- mean((actual_values - pred)^2)
-
-      if (!is.finite(fold_mse)) { # Check for NA, NaN, Inf MSE
-          message(sprintf("walk_forward_cv_nbar: Fold %d resulted in non-finite MSE. Skipping fold.", fold_counter))
-          return("skip_fold")
-      }
-
-      if (fold_mse > bad_fold_threshold) {
-        message(sprintf("walk_forward_cv_nbar: Fold %d failed MSE check (MSE=%.4f > Threshold=%.4f). Stopping CV.",
-                        fold_counter, fold_mse, bad_fold_threshold))
-        return("stop_cv") # Signal to stop entire CV
-      }
-
-      # --- Store Fold Results ---
-      # Use <<- to assign to fold_data outside the tryCatch scope
-      fold_data <<- tibble(
+      # Store
+      tibble(
         fold = fold_counter,
         train_end = current_train_end,
         date = test_fold$date,
         horizon = 1:nrow(test_fold),
-        actual = actual_values,
+        actual = test_fold[[outcome]],
         forecast = pred
-        # Optionally add fold_mse here if needed later:
-        # fold_mse = fold_mse
-      )
-      "success" # Signal success for this fold
+      )}, error = function(e) {
+        message("Error in fold ", fold_counter, ": ", e$message)
+        return(NULL)
+      })
 
-    }, error = function(e) {
-      # Catch errors *within* a specific fold's processing
-      message("walk_forward_cv_nbar: Error processing fold ", fold_counter, ": ", e$message)
-      # Decide whether an error should skip the fold or stop the whole CV
-      # Defaulting to skip here, but could return "stop_cv" if errors are critical
-      return("skip_fold")
-    }) # End tryCatch
-
-    # --- Process fold status ---
-    if (identical(fold_status, "stop_cv")) {
-      return(NULL) # Stop processing and signal failure to fit_and_cv
-    } else if (identical(fold_status, "success") && !is.null(fold_data)) {
-      cv_results[[as.character(fold_counter)]] <- fold_data # Use fold_counter as name
-      message("walk_forward_cv_nbar: Finished processing fold ", fold_counter, " (MSE: ", sprintf("%.4f", fold_mse), ")")
-    } else {
-      # Fold was skipped (due to error, not enough data, or failed fit/pred)
-      # Message already printed within tryCatch or the initial check
+    if (!is.null(fold_result)) {
+      cv_results[[fold_counter]] <- fold_result
     }
 
-    # --- Update for next iteration ---
-    # Move to the next potential training end date
-    current_train_end <- current_train_end + days(test_days)
+    # Update
+    current_train_end <- current_train_end + days(test_days) # max(test_fold$date)
     fold_counter <- fold_counter + 1
+    message("walk_forward_cv_nbar: Finished processing fold ", fold_counter - 1)
+    break
+  }
 
-  } # End while loop
-
-  # --- Final Return ---
   if (length(cv_results) > 0) {
-    # Combine results from all *successful* folds
     return(bind_rows(cv_results))
   } else {
-    message("walk_forward_cv_nbar: No successful folds completed.")
-    return(NULL) # Signal failure if no folds worked
+    message("walk_forward_cv_nbar: All folds failed.")
+    return(NULL)
   }
-}
 
+}
 
 ## ===== Auxiliary Functions =====
 
@@ -386,11 +327,11 @@ plot_train_test_side_by_side <- function(loc, train_weekly, test_weekly, ar_labe
   # Create the plot
   p <- ggplot() +
     # Plot observations from both training and testing (same color)
-    geom_line(data = train_weekly, aes(x = week, y = obs), color = "blue", size = 1) +
-    geom_line(data = test_weekly, aes(x = week, y = obs), color = "blue", size = 1) +
+    geom_line(data = train_weekly, aes(x = week, y = obs), color = "blue", linewidth = 1) +
+    geom_line(data = test_weekly, aes(x = week, y = obs), color = "blue", linewidth = 1) +
     # Plot training predictions (red) and testing predictions (green)
-    geom_line(data = train_weekly, aes(x = week, y = pred, color = "Train Prediction"), size = 1) +
-    geom_line(data = test_weekly, aes(x = week, y = pred, color = "Test Prediction"), size = 1) +
+    geom_line(data = train_weekly, aes(x = week, y = pred, color = "Train Prediction"), linewidth = 1) +
+    geom_line(data = test_weekly, aes(x = week, y = pred, color = "Test Prediction"), linewidth = 1) +
     labs(title = paste("Training and Testing Predictions: Restaurant", loc, "- AR lags:", ar_label, "- Mean lags:", mean_label),
          x = "Day", y = "Count", color = "Legend") +
     theme_minimal() +
@@ -460,13 +401,9 @@ process_models <- function(df, loc, outcome, predictors, model_type="nb", ar_lag
 aggregate_cv_results <- function(cv) {
   cv %>%
     group_by(fold) %>%
-    # Calculate fold-specific metrics
     summarize(mae = mean(abs(actual - forecast)),
-              mse = mean((actual - forecast)^2),
-              .groups = 'drop') %>% # Ensure ungrouping after summarizing by fold
-    # Calculate overall average metrics across successful folds
-    summarize(mae = mean(mae, na.rm = TRUE), # Use na.rm just in case
-              mse = mean(mse, na.rm = TRUE)) %>%
+              mse = mean((actual - forecast)^2)) %>%
+    summarize(mae = mean(mae), mse = mean(mse)) %>%
     pull('mse') %>%
     identity()
 }
