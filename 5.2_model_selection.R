@@ -210,18 +210,17 @@ predictors <- c(
 ## ======= AR/Mean Selection Functions =======
 
 # 4. Cross-validation wrapper function
-fit_and_cv <- function(df,
-                       loc_id,
-                       outcome,
-                       predictors,
-                       ar_lags,
-                       mean_lags,
-                       initial_train_days = 63,
-                       test_days = 42,
-                       bad_fold_threshold = Inf) { # <-- Added threshold parameter with default Inf
-
-  # print(mean_lags) # Keep if useful for debugging
-
+fit_and_cv <- function(df, 
+                       loc_id, 
+                       outcome, 
+                       predictors, 
+                       ar_lags, 
+                       mean_lags, 
+                       initial_train_days = 63, 
+                       test_days = 42) {
+  
+  print(mean_lags)
+  
   # Calculate CV result
   cv_result <- tryCatch(
     walk_forward_cv_nbar(df,
@@ -232,29 +231,24 @@ fit_and_cv <- function(df,
                          test_days = test_days,
                          ar_lags = ar_lags,
                          mean_lags = mean_lags,
-                         sample = FALSE,
-                         bad_fold_threshold = bad_fold_threshold), # <-- Pass threshold down
+                         sample = FALSE), 
     error = function(e) {
-      # Catch errors *during* the call to walk_forward_cv_nbar itself
-      message("fit_and_cv: Error during cross-validation call: ", e$message)
+      message("fit_and_cv: Error in cross-validation: ", e$message)
       NULL}
-  )
-
-  # Don't try to aggregate if CV failed or was stopped early
-  if (is.null(cv_result)) {
-     # Message about stopping/failure already printed within walk_forward_cv_nbar
-     # message("fit_and_cv: Cross-validation did not complete successfully (might be due to bad fold or error). Returning Inf.")
-     return(Inf)
-  }
-
-  # Aggregate CV result if it completed successfully
+    )
+  
+  # Don't try to aggregate if it already failed
+  if (is.null(cv_result)) return(Inf)
+  
+  # Fit CV result
   tryCatch(
-    aggregate_cv_results(cv_result),
+    aggregate_cv_results(cv_result), 
     error = function(e) {
       message("Error aggregating CV results: ", e$message)
       Inf}
-  )
+    )
 }
+
 
 
 parallelize_garch_models <- function(fit_func, 
@@ -262,7 +256,8 @@ parallelize_garch_models <- function(fit_func,
                                      loc_id,  
                                      outcome,
                                      predictors,
-                                     lags,
+                                     ar_lag_sets, 
+                                     mean_lag_sets,
                                      timeout = 3 # timeout in minutes
                                      ) {
   
@@ -293,35 +288,38 @@ parallelize_garch_models <- function(fit_func,
   }
   
   # Initialize grid of AR and mean lags
-  names(lags) <- c(
-    "ar_lags",
-    "mean_lags"
-  )
+  param_grid_lags <- expand.grid(ar_lags = ar_lag_sets_1, 
+                                 mean_lags = mean_lag_sets_1, stringsAsFactors = FALSE)
+  names(param_grid_lags) <- c("ar_lags", 
+                              "mean_lags")
   
   
   
   # Start memory and time tracking
   mem_used <- mem_used()
   start_time <- Sys.time()
-
+  
   # Run model training over grid in parallel
-  param_grid_lags$cv_results <- future_pmap(lags, function(ar_lags_, mean_lags_) {error_handled_func(df, loc_id, outcome, predictors, ar_lags_, mean_lags_)})
+  param_grid_lags$cv_results <- future_pmap(param_grid_lags, function(ar_lags_, mean_lags_) {error_handled_func(df, loc_id, outcome, predictors, ar_lags_, mean_lags_)})
 
   # End memory and time tracking
   end_time <- Sys.time()
   mem_used_after <- mem_used()
   print(mem_used_after - mem_used)
   print(difftime(end_time, start_time, units = "secs"))
-
-  # Save
-  # saveRDS(param_grid_lags, file = paste0("validation_results/early_stopping/param_grid_lags_",loc_id,".rds"))
-
+  
+  # Return to single core
+  
+  
+  # # Save
+  # saveRDS(param_grid_lags, file = paste0("param_grid_lags_",loc_id,".rds"))
+  
   # Return
   param_grid_lags
 }
 
 # Start multisession
-num_cores <- detectCores() - 1
+num_cores <- 90
 print(num_cores)
 plan(multisession, workers = num_cores)
 for (loc_id in restaurants_by_coverage[5:5]) {
@@ -332,11 +330,15 @@ for (loc_id in restaurants_by_coverage[5:5]) {
                                               loc_id = loc_id,
                                               outcome = outcome,
                                               predictors = predictors,
-                                              lags = combined_design)
+                                              ar_lag_sets = ar_lag_sets_1,
+                                              mean_lag_sets = mean_lag_sets_1)
   # Rprof(NULL)
 
-  saveRDS(param_grid_lags, file = paste0("param_grid_lags_entire_data_",loc_id,".rds"))
+  saveRDS(param_grid_lags, file = paste0("validation_results/early_stopping/param_grid_lags_entire_data_",loc_id,".rds"))
 
 }
 
 plan(sequential)
+
+
+readRDS("validation_results/early_stopping/param_grid_lags_entire_data_ED5J990H5VAZT.rds")
