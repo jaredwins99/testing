@@ -116,8 +116,8 @@ with(mlflow_start_run(), {
   
   output_dir <- file.path(
     "model_fits",
-    "empirical",
-    "multilevel_transfer_2",
+    "official",
+    "its",
     outcome)
   plot_dir <- file.path(
     output_dir,
